@@ -1,0 +1,227 @@
+---
+title: "SRM 611 Project 3: Count and Proportion Models"
+author: "Fred Chen"
+date: "`r format(Sys.Date(), '%B %Y')`"
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 6, fig.height = 4, fig.align = "center")
+library(ggplot2)
+library(knitr)
+```
+
+# Part II: Student Absences Analysis
+
+## 2. Description, Source, and Exploration of the Data
+
+### 2.1 Basic data information
+
+```{r data}
+student <- read.csv("student-por.csv", stringsAsFactors = TRUE)
+
+dim(student)
+str(student)
+colSums(is.na(student))
+```
+
+### 2.2 Response: absences
+
+```{r response}
+summary(student$absences)
+
+resp_summary <- data.frame(
+  n        = length(student$absences),
+  Mean     = mean(student$absences),
+  Variance = var(student$absences),
+  Ratio    = var(student$absences) / mean(student$absences),
+  Pct_Zero = mean(student$absences == 0) * 100
+)
+kable(resp_summary, digits = 2,
+      caption = "Summary of the response variable (absences)")
+
+table(student$absences)
+```
+
+```{r fig1, fig.cap="Figure 1: Distribution of absences"}
+ggplot(student, aes(x = absences)) +
+  geom_bar(fill = "grey60", color = "black") +
+  labs(x = "Number of Absences", y = "Number of Students") +
+  theme_bw()
+```
+
+### 2.3 Predictors
+
+```{r predictors}
+walc_tab <- do.call(rbind, lapply(split(student$absences, student$Walc), function(x)
+  c(n = length(x), Mean = mean(x), Variance = var(x))))
+kable(walc_tab, digits = 2,
+      caption = "Table 1: Absences by weekend alcohol use (Walc)")
+
+table(student$Walc)
+table(student$Dalc)
+table(student$studytime)
+table(student$failures)
+table(student$sex)
+table(student$school)
+summary(student$age)
+```
+
+```{r fig2, fig.cap="Figure 2: Absences by weekend alcohol consumption (red diamond = mean)"}
+ggplot(student, aes(x = factor(Walc), y = absences)) +
+  geom_boxplot(fill = "grey80") +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "red") +
+  labs(x = "Weekend Alcohol Use (1 = very low, 5 = very high)",
+       y = "Number of Absences") +
+  theme_bw()
+```
+
+```{r collinearity}
+# Correlation between weekday and weekend alcohol use
+cor(student$Dalc, student$Walc)
+```
+
+## 3. Proposed Analyses
+
+```{r model-formula}
+library(MASS)
+
+model_formula <- absences ~ Walc + studytime + failures + sex + age + school
+```
+
+## 4. Analysis Results
+
+### 4.1 Poisson regression
+
+```{r poisson}
+pois_model <- glm(model_formula, family = poisson(link = "log"), data = student)
+summary(pois_model)
+```
+
+### 4.2 Overdispersion check
+
+```{r dispersion}
+pearson_chi2 <- sum(residuals(pois_model, type = "pearson")^2)
+
+disp_tab <- data.frame(
+  Statistic = c("Deviance", "Pearson Chi-square"),
+  Value     = c(deviance(pois_model), pearson_chi2),
+  df        = df.residual(pois_model),
+  Ratio     = c(deviance(pois_model), pearson_chi2) / df.residual(pois_model)
+)
+kable(disp_tab, digits = 2, caption = "Table 2: Poisson goodness-of-fit and dispersion")
+
+mu_hat  <- fitted(pois_model)
+y       <- student$absences
+ct_test <- lm(((y - mu_hat)^2 - y) / mu_hat ~ mu_hat - 1)
+summary(ct_test)$coefficients
+```
+
+### 4.3 Negative binomial regression
+
+```{r negbin}
+nb_model <- glm.nb(model_formula, data = student)
+summary(nb_model)
+
+c(theta = nb_model$theta, SE_theta = nb_model$SE.theta, alpha = 1 / nb_model$theta)
+```
+
+### 4.4 Poisson vs. negative binomial
+
+```{r compare}
+lr_stat <- as.numeric(2 * (logLik(nb_model) - logLik(pois_model)))
+lr_p    <- 0.5 * pchisq(lr_stat, df = 1, lower.tail = FALSE)
+c(LR = lr_stat, p_value = lr_p)
+
+fit_tab <- data.frame(
+  Model      = c("Poisson", "Negative Binomial"),
+  LogLik     = c(logLik(pois_model), logLik(nb_model)),
+  AIC        = c(AIC(pois_model), AIC(nb_model)),
+  BIC        = c(BIC(pois_model), BIC(nb_model)),
+  Pearson_df = c(pearson_chi2 / df.residual(pois_model),
+                 sum(residuals(nb_model, type = "pearson")^2) / df.residual(nb_model))
+)
+kable(fit_tab, digits = 2, caption = "Table 3: Model comparison")
+
+se_tab <- data.frame(
+  Poisson_Est = coef(pois_model),
+  Poisson_SE  = sqrt(diag(vcov(pois_model))),
+  NB_Est      = coef(nb_model),
+  NB_SE       = sqrt(diag(vcov(nb_model)))
+)
+kable(se_tab, digits = 3, caption = "Table 4: Coefficient estimates and standard errors")
+```
+
+```{r fig3, fig.cap="Figure 3: Observed vs. predicted distribution of absences"}
+max_y <- 15
+obs_freq  <- sapply(0:max_y, function(k) mean(y == k))
+pois_freq <- sapply(0:max_y, function(k) mean(dpois(k, fitted(pois_model))))
+nb_freq   <- sapply(0:max_y, function(k)
+  mean(dnbinom(k, mu = fitted(nb_model), size = nb_model$theta)))
+
+freq_df <- data.frame(
+  absences   = rep(0:max_y, 3),
+  proportion = c(obs_freq, pois_freq, nb_freq),
+  source     = rep(c("Observed", "Poisson", "Negative Binomial"), each = max_y + 1)
+)
+
+ggplot(freq_df, aes(x = absences, y = proportion)) +
+  geom_col(data = subset(freq_df, source == "Observed"),
+           fill = "grey75", color = "black") +
+  geom_line(data = subset(freq_df, source != "Observed"),
+            aes(color = source, linetype = source), linewidth = 0.9) +
+  geom_point(data = subset(freq_df, source != "Observed"),
+             aes(color = source), size = 1.8) +
+  labs(x = "Number of Absences", y = "Proportion of Students",
+       color = "Model", linetype = "Model") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+### 4.5 Final model: incidence rate ratios
+
+```{r irr}
+nb_coef <- summary(nb_model)$coefficients
+
+irr_tab <- data.frame(
+  Estimate = nb_coef[, 1],
+  SE       = nb_coef[, 2],
+  IRR      = exp(nb_coef[, 1]),
+  CI_Lower = exp(nb_coef[, 1] - 1.96 * nb_coef[, 2]),
+  CI_Upper = exp(nb_coef[, 1] + 1.96 * nb_coef[, 2]),
+  p_value  = nb_coef[, 4]
+)
+kable(irr_tab, digits = 3, caption = "Table 5: Negative binomial incidence rate ratios")
+```
+
+### 4.6 Linearity of Walc
+
+```{r walc-linear}
+nb_factor <- glm.nb(absences ~ factor(Walc) + studytime + failures + sex + age + school,
+                    data = student)
+anova(nb_model, nb_factor)
+```
+
+### 4.7 Diagnostics
+
+```{r fig4, fig.cap="Figure 4: Pearson residuals vs. log fitted values (negative binomial)"}
+diag_df <- data.frame(
+  fitted  = fitted(nb_model),
+  pearson = residuals(nb_model, type = "pearson")
+)
+
+ggplot(diag_df, aes(x = log(fitted), y = pearson)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_smooth(se = FALSE, method = "loess", color = "red") +
+  labs(x = "log(Fitted Values)", y = "Pearson Residuals") +
+  theme_bw()
+```
+
+```{r influence}
+cooks <- cooks.distance(nb_model)
+sum(cooks > 4 / nrow(student))
+head(sort(cooks, decreasing = TRUE))
+```
